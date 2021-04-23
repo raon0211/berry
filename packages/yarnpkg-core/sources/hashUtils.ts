@@ -2,6 +2,8 @@ import {PortablePath, xfs, npath} from '@yarnpkg/fslib';
 import {createHash, BinaryLike}   from 'crypto';
 import globby                     from 'globby';
 
+import {WorkerPool}               from './WorkerPool';
+
 export function makeHash<T extends string = string>(...args: Array<BinaryLike | null>): T {
   const hash = createHash(`sha512`);
 
@@ -25,23 +27,33 @@ export function makeHash<T extends string = string>(...args: Array<BinaryLike | 
   return hash.digest(`hex`) as T;
 }
 
+let checksumPool: WorkerPool<string, string>;
+
 export function checksumFile(path: PortablePath) {
-  return new Promise<string>((resolve, reject) => {
-    const hash = createHash(`sha512`);
-    const stream = xfs.createReadStream(path);
+  checksumPool ||= new WorkerPool(`
+const { createHash } = require('crypto');
+const { parentPort } = require('worker_threads');
+const { createReadStream } = require('fs')
 
-    stream.on(`data`, chunk => {
-      hash.update(chunk);
-    });
+parentPort.on('message', async (filePath) => {
+  const stream = createReadStream(filePath)
+  const hash = createHash('sha512');
 
-    stream.on(`error`, error => {
-      reject(error);
-    });
-
-    stream.on(`end`, () => {
-      resolve(hash.digest(`hex`));
-    });
+  stream.on('data', chunk => {
+    hash.update(chunk);
   });
+
+  stream.on('error', error => {
+    throw error
+  });
+
+  stream.on('end', () => {
+    parentPort.postMessage(hash.digest('hex'));
+  });
+});
+  `);
+
+  return checksumPool.run(npath.fromPortablePath(path));
 }
 
 export async function checksumPattern(pattern: string, {cwd}: {cwd: PortablePath}) {
